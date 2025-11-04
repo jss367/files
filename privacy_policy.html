@@ -1,0 +1,339 @@
+Penetration Test Report — Company A
+
+Engagement date: 2025-11-04
+Prepared by: Red Banana Security
+Client: Company A
+Report version: 1.0
+
+1. Executive summary
+
+A time-boxed, external penetration test was performed against Company A’s publicly facing infrastructure between 2025-10-27 and 2025-11-03. The objective was to identify exploitable security weaknesses that could lead to unauthorized access, data disclosure, or service disruption.
+
+Key results (high level):
+
+1 Critical (successful privilege escalation via exposed internal management interface with default credentials).
+
+2 High (broken authentication on an API endpoint allowing account takeover; outdated web server with known vulnerabilities enabling information disclosure).
+
+3 Medium (sensitive data in web responses, weak TLS configuration, missing HTTP security headers).
+
+4 Low (information leakage, expired certificates on non-production subdomain, predictable resource identifiers).
+
+Overall risk to Company A is High: an unauthenticated attacker with only internet access can gain foothold and move laterally toward internal assets. Immediate remediation is recommended for the Critical and High findings.
+
+2. Scope
+
+In-scope:
+
+External IP ranges and hostnames provided by Company A:
+
+203.0.113.0/28 (sample)
+
+www.companya.example (production website)
+
+api.companya.example (public API)
+
+admin.companya.example (management interface)
+
+Tests limited to non-destructive techniques unless explicitly authorized. No social engineering, phishing, or physical attacks.
+
+Out-of-scope:
+
+Internal (behind-VPN) networks, employee devices, and production database writes.
+
+Rules of engagement highlights:
+
+Time-boxed scans during off-peak hours when possible.
+
+All testing performed using test accounts or non-destructive methods unless explicit authorization granted to perform authenticated active tests (authorized for specific penetration steps noted in findings).
+
+3. Methodology
+
+Testing combined automated discovery and manual verification:
+
+Reconnaissance — DNS enumeration, subdomain discovery, port scanning (TCP), service fingerprinting.
+
+Vulnerability scanning — non-intrusive scanning to identify likely issues.
+
+Manual validation & exploitation — verify scanner findings, attempt to authenticate, enumerate, and escalate only where authorized.
+
+Post-compromise enumeration — collection of accessible data, privilege escalation attempts within scope.
+
+Reporting — triage findings, provide remediation guidance and evidence.
+
+Tools used (representative): nmap, curl, Burp Suite (passive & active where authorized), OpenVAS/Nessus (non-intrusive), custom scripts for enumeration. (No production-destructive exploits run.)
+
+4. Findings (ordered by severity)
+Finding 1 — Critical
+
+Title: Management interface (admin.companya.example) accessible publicly with default credentials
+Risk: Critical — full administrative access possible.
+CVSS v3.1: 9.8 (Critical) — high impact and high exploitability.
+Description / impact: The administrative web interface intended for internal use was reachable over the public Internet on admin.companya.example:8443. Authentication was enforced but accepted the default manufacturer credentials (admin:admin) that appear to have never been changed. With this access an attacker can:
+
+View and export user lists and API keys.
+
+Change configuration including DNS or callback endpoints.
+
+Upload arbitrary files to certain management endpoints (file upload restricted to .cfg/.json in UI but server fails to validate file contents).
+
+Proof-of-concept (sanitized):
+
+curl -sk https://admin.companya.example:8443/ → management login page returned.
+
+Successful login via web UI using username admin, password admin (observed session cookie SESSIONID set).
+
+From admin console > System > API Keys: list of keys shown. A subset of keys have wildcard scopes.
+
+Evidence (summary):
+
+Screenshot of authenticated admin dashboard (available to client upon request).
+
+Response headers showing Server: VendorX-Management/2.1.
+
+Recommendation (priority: immediate):
+
+Disable public access to the management interface. Restrict to internal IPs or VPN only (network ACLs/firewall).
+
+Immediately rotate all keys discovered and revoke any with broad scopes.
+
+Enforce non-default, strong passwords and implement MFA for admin accounts.
+
+Harden file upload handling to validate content types and apply strict server-side validation.
+
+Audit configuration change logs and review recent changes for potential unauthorized modifications.
+
+Finding 2 — High
+
+Title: Broken authentication on api.companya.example allowing account takeover via IDOR + session fixation
+Risk: High — attacker can impersonate other users.
+CVSS v3.1: 8.6 (High)
+
+Description / impact:
+A user-level API endpoint used to retrieve account settings (GET /v1/users/{user_id}/settings) did not properly verify that the caller owned the requested user_id. Combining this with predictable UUIDs and the ability to fix session identifiers (session tokens issued without binding to client attributes), an attacker can enumerate user IDs and retrieve or modify other users’ settings. In this environment some users had access to sensitive profile fields (email, phone) and API tokens.
+
+Proof-of-concept (sanitized):
+
+Enumerated user_id values by observing URL patterns in public pages and incremented the last segment.
+
+GET https://api.companya.example/v1/users/00000000-0000-0000-0000-000000000045/settings returned another user's settings without authorization check when valid session token was presented.
+
+Session fixation: an attacker-supplied token in Authorization: Bearer <token> was accepted and mapped to a user if token reused; token rotation was not enforced after password reset.
+
+Recommendation (priority: immediate):
+
+Implement strict authorization checks on user-scoped endpoints: ensure user_id in path equals authenticated principal.
+
+Employ opaque session tokens bound to client properties (e.g., TLS session, IP heuristic, rotation).
+
+Add rate limits and anomaly detection to prevent enumeration.
+
+Force rotation of tokens and reset sessions for suspect accounts.
+
+Perform access control review on all API endpoints.
+
+Finding 3 — High
+
+Title: Outdated web server with known information disclosure (version 1.2.3)
+Risk: High — may facilitate further exploitation and reconnaissance.
+CVSS v3.1: 7.5 (High) for certain exploits (information disclosure and potential code execution in older versions)
+
+Description / impact:
+The production web server www.companya.example reports a header indicating an old server version (Server: WebServ/1.2.3). This version has public advisories for vulnerabilities that allow request smuggling and directory indexing under certain configurations. While we did not perform active exploitation, the presence of this version increases risk and attack surface.
+
+Proof-of-concept (sanitized):
+
+curl -I https://www.companya.example/ returned header Server: WebServ/1.2.3.
+
+Passive checks indicated a misconfiguration allowing directory listing on /static/.well-known/ on a non-production host.
+
+Recommendation (priority: high):
+
+Upgrade web server to a supported, patched version.
+
+Review server configuration to disallow directory listing and unnecessary modules.
+
+Implement a process for tracking and applying security updates (patch management).
+
+Harden headers (see Finding 5).
+
+Finding 4 — Medium
+
+Title: Sensitive information in verbose error messages
+Risk: Medium — may aid attackers in targeted exploitation.
+
+Description / impact:
+Error pages and API error responses include stack traces and internal file paths (e.g., /srv/app/src/users.py:234), which reveal internal structure and technology stack. This information can assist attackers in creating targeted exploits or finding misconfigurations.
+
+Sample response (sanitized):
+
+{
+  "error": "UnhandledException",
+  "message": "IndexError at /v1/users",
+  "trace": "File \"/srv/app/src/users.py\", line 234, in get_user"
+}
+
+
+Recommendation (priority: medium):
+
+Replace verbose error responses with generic user-friendly messages in production.
+
+Log detailed errors internally (secure log storage) for debugging, not to client responses.
+
+Implement proper exception handling and input validation.
+
+Finding 5 — Medium
+
+Title: Weak TLS configuration and missing HTTP security headers
+Risk: Medium — reduces overall transport security and increases risk of man-in-the-middle and content injection.
+
+Details:
+
+TLS: supports TLS 1.0 and weak ciphers; ECDHE suites not prioritized.
+
+Missing headers: Content-Security-Policy, X-Frame-Options, Strict-Transport-Security (HSTS) either missing or misconfigured.
+
+Recommendation (priority: medium):
+
+Disable TLS 1.0/1.1, require TLS 1.2+ (prefer TLS 1.3).
+
+Configure server to prefer strong ciphers (ECDHE AES-GCM).
+
+Add/enable headers: Strict-Transport-Security: max-age=31536000; includeSubDomains, X-Frame-Options: DENY, Content-Security-Policy tailored to the site.
+
+Finding 6 — Low
+
+Title: Non-production subdomain (dev.companya.example) has expired cert and index page publicly accessible
+Risk: Low — information leakage and opportunity for phishing/triage confusion.
+
+Recommendation: Revoke/renew certificate or remove DNS entry; ensure pre-production assets are not publicly accessible.
+
+5. Risk matrix & priorities
+
+Immediate (within 24 hours): Finding 1 (Critical) — block public access, rotate keys, enable MFA.
+
+Urgent (1–7 days): Finding 2 & Finding 3 (High) — fix authentication/authorization and patch server.
+
+Short-term (2–4 weeks): Findings 4 & 5 (Medium) — sanitize errors, harden TLS and headers.
+
+Routine (1–3 months): Finding 6 & ongoing security hygiene.
+
+6. Remediation guidance (detailed)
+For Critical (management interface)
+
+Network: Apply firewall rules to restrict admin.companya.example:8443 to internal management IP ranges or use VPN/bastion with 2FA.
+
+Credentials: Enforce complex password policy, rotate all default and weak credentials, and disable default accounts.
+
+Logging: Enable audit logging for admin actions and alert on unusual configuration changes.
+
+Secrets: Remove any API keys with wildcard scopes; implement least-privilege roles for API keys and rotate them immediately after revocation.
+
+File upload: Enforce server-side content-type checks and scanning; store uploads in non-executable locations; sandbox parsing.
+
+For API auth issues
+
+Authorization: Use server-side authorization checks comparing authenticated principal to resource owner.
+
+Tokens: Implement short-lived tokens with refresh tokens bound to client context; support token revocation and rotation.
+
+Rate-limiting: Add per-account rate limits to thwart enumeration and credential stuffing.
+
+For server/version issues
+
+Patch or upgrade to vendor-supported versions.
+
+Reduce server banner verbosity in headers.
+
+Configure automated patch assessment or update pipeline.
+
+For TLS and headers
+
+Use an industry standard configuration (e.g., Mozilla TLS recommendations).
+
+Deploy CSP, HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-Policy.
+
+General
+
+Implement regular external and internal penetration testing cadence (quarterly for high-risk internet-facing systems).
+
+Conduct code review for authentication and session management flows.
+
+Implement centralized Secrets Management and rotate secrets periodically.
+
+7. Evidence & technical appendix (sanitized)
+
+Note: detailed raw logs and screenshots have been provided to Company A via secure channel. The following is a high-level technical summary suitable for operational teams.
+
+Sample commands used (non-destructive)
+
+nmap -sS -Pn -p 1-65535 203.0.113.10 — port discovery
+
+curl -I https://www.companya.example/ — header inspection
+
+curl -sk -X GET "https://api.companya.example/v1/users/<id>/settings" -H "Authorization: Bearer <token>" — API probe (authenticated)
+
+Burp Suite (passive scan, manual replay) to validate authorization.
+
+Notable server headers (example)
+HTTP/1.1 200 OK
+Server: WebServ/1.2.3
+X-Powered-By: Python/3.9
+Set-Cookie: SESSIONID=abcd1234; HttpOnly; Secure
+
+Sample sensitive fields discovered in API response (redacted)
+{
+  "user_id": "00000000-0000-0000-0000-000000000045",
+  "email": "redacted@example.com",
+  "api_keys": ["redacted-*"]
+}
+
+8. Timeline of activities
+
+2025-10-27: Reconnaissance and port/service discovery.
+
+2025-10-28: Subdomain enumeration and passive scanning.
+
+2025-10-30: Manual testing on admin.companya.example and api.companya.example (authenticated tests authorized).
+
+2025-11-01: Confirmed default credentials allowed access — evidence collected.
+
+2025-11-03: Final verification of findings, drafted report.
+
+9. Limitations & false-positive notes
+
+No destructive exploitation was performed; for findings flagged “possible” (e.g., server version vulnerability), we did not attempt intrusive exploitation without explicit authorization.
+
+Some endpoints rate-limited and returned inconsistent responses; those were re-tested with conservative timing to avoid service disruption.
+
+Access to internal network or privileged credentials beyond those in-scope was not attempted.
+
+10. Conclusion
+
+Testing revealed critical weaknesses that allow full administrative access and account takeover paths. Immediate actions (restricting management access, rotating keys, enforcing MFA, and fixing API authorization) will significantly reduce risk. Once those are implemented, follow-up validation testing is recommended.
+
+If desired, Red Oak Security can provide:
+
+A prioritized remediation plan and technical playbook.
+
+Re-test (validation) once fixes are deployed.
+
+Secure code and architecture review for auth/session flows.
+
+Appendix A — Short checklist for ops (quick actions)
+
+Block admin.companya.example from public Internet.
+
+Rotate API keys and revoke wildcards.
+
+Enforce MFA for admin accounts.
+
+Patch web server and re-check server headers.
+
+Fix API authorization logic (owner checks).
+
+Harden TLS and add security headers.
+
+Sanitize error messages.
+
+Schedule a follow-up validation test.
